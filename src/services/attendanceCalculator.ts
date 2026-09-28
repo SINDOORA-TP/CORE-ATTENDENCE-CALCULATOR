@@ -79,17 +79,14 @@ function getDayName(date: Date): string {
  * Returns true for holidays, exams, and events (non-class days).
  */
 function isNonWorkingDay(dateStr: string): boolean {
-  const entry = ACADEMIC_CALENDAR.find(e => e.date === dateStr);
-  if (!entry) return false;
-  return entry.type === 'holiday' || entry.type === 'exam' || entry.type === 'event';
+  return SEMESTER_DATES.holidays.includes(dateStr);
 }
 
 /**
  * Check if a date is a special working day (e.g., a Saturday declared working).
  */
 function isSpecialWorkingDay(dateStr: string): boolean {
-  const entry = ACADEMIC_CALENDAR.find(e => e.date === dateStr);
-  return entry?.type === 'special_working' || false;
+  return false;
 }
 
 /**
@@ -108,7 +105,7 @@ function formatDate(date: Date): string {
  */
 export function countRemainingClasses(
   timetable: TimetableEntry,
-  subject: string,
+  subjectSlot: string,
   fromDate: Date,
   toDate: Date
 ): number {
@@ -116,7 +113,7 @@ export function countRemainingClasses(
   const current = new Date(fromDate);
   current.setDate(current.getDate() + 1); // start from next day
 
-  const semEnd = new Date(SEMESTER_DATES.end);
+  const semEnd = new Date(SEMESTER_DATES.endDate);
 
   // Don't count beyond semester end
   const effectiveEnd = toDate < semEnd ? toDate : semEnd;
@@ -140,14 +137,20 @@ export function countRemainingClasses(
     }
 
     if (isWorkingDay) {
-      const daySchedule = timetable.timetable[dayName] || [];
+      // Find the day schedule for this dayName
+      // capitalize first letter to match DaySchedule format (e.g. 'Monday')
+      const capitalizedDay = dayName.charAt(0).toUpperCase() + dayName.slice(1);
+      
+      const daySchedule = timetable.schedule.find(s => s.day === capitalizedDay)?.periods || [];
+      const mondaySchedule = timetable.schedule.find(s => s.day === 'Monday')?.periods || [];
+      
       // For special working Saturdays, use Monday's schedule as a convention
       const schedule = (dayName === 'saturday' && isSpecialWorkingDay(dateStr))
-        ? (timetable.timetable['monday'] || [])
+        ? mondaySchedule
         : daySchedule;
 
-      // Count how many times this subject appears in the day's schedule
-      const subjectCount = schedule.filter(s => s === subject).length;
+      // Count how many times this subject slot appears in the day's schedule
+      const subjectCount = schedule.filter(s => s !== null && s.startsWith(subjectSlot)).length;
       count += subjectCount;
     }
 
@@ -167,7 +170,11 @@ export function countAllRemainingClasses(
 ): Record<string, number> {
   const result: Record<string, number> = {};
   for (const subject of timetable.subjects) {
-    result[subject] = countRemainingClasses(timetable, subject, fromDate, toDate);
+    if (subject.slot && subject.slot !== '-') {
+      result[subject.name] = countRemainingClasses(timetable, subject.slot, fromDate, toDate);
+    } else {
+      result[subject.name] = 0;
+    }
   }
   return result;
 }
@@ -235,13 +242,13 @@ export function determineStatus(
   maxPossiblePct: number,
   rules: AttendanceRules
 ): AttendanceStatus {
-  if (maxPossiblePct < rules.minimum_percentage) {
+  if (maxPossiblePct < rules.minimumPercentage) {
     return 'irreversible';
   }
-  if (currentPct < rules.minimum_percentage) {
+  if (currentPct < rules.minimumPercentage) {
     return 'danger';
   }
-  if (currentPct < rules.minimum_percentage + rules.warning_threshold) {
+  if (currentPct < rules.warningPercentage) {
     return 'warning';
   }
   return 'safe';
@@ -292,7 +299,7 @@ export function calculateAttendance(
   rules: AttendanceRules = DEFAULT_RULES
 ): CalculationResult | { error: string } {
   // Find timetable for this section
-  const timetable = TIMETABLES.find(t => t.section === sectionName);
+  const timetable = TIMETABLES[sectionName];
   if (!timetable) {
     return { error: 'Timetable data is unavailable for this section. Please contact the administrator.' };
   }
@@ -308,8 +315,8 @@ export function calculateAttendance(
     const remaining = remainingMap[input.subject] || 0;
     const currentPct = calculatePercentage(input.attended, input.conducted);
     const maxPossible = maxPossibleAttendance(input.attended, input.conducted, remaining);
-    const reqMin = requiredClassesForTarget(input.attended, input.conducted, remaining, rules.minimum_percentage);
-    const reqTarget = requiredClassesForTarget(input.attended, input.conducted, remaining, rules.target_percentage);
+    const reqMin = requiredClassesForTarget(input.attended, input.conducted, remaining, rules.minimumPercentage);
+    const reqTarget = requiredClassesForTarget(input.attended, input.conducted, remaining, rules.targetPercentage);
     const status = determineStatus(currentPct, maxPossible, rules);
 
     return {
@@ -324,8 +331,8 @@ export function calculateAttendance(
       canReachMinimum: reqMin !== -1,
       canReachTarget: reqTarget !== -1,
       status,
-      alreadyAboveMinimum: currentPct >= rules.minimum_percentage,
-      alreadyAboveTarget: currentPct >= rules.target_percentage,
+      alreadyAboveMinimum: currentPct >= rules.minimumPercentage,
+      alreadyAboveTarget: currentPct >= rules.targetPercentage,
     };
   });
 
@@ -335,8 +342,8 @@ export function calculateAttendance(
   const totalRemaining = subjectResults.reduce((sum, s) => sum + s.remainingClasses, 0);
   const overallPct = calculatePercentage(totalAttended, totalConducted);
   const maxOverall = maxPossibleAttendance(totalAttended, totalConducted, totalRemaining);
-  const overallReqMin = requiredClassesForTarget(totalAttended, totalConducted, totalRemaining, rules.minimum_percentage);
-  const overallReqTarget = requiredClassesForTarget(totalAttended, totalConducted, totalRemaining, rules.target_percentage);
+  const overallReqMin = requiredClassesForTarget(totalAttended, totalConducted, totalRemaining, rules.minimumPercentage);
+  const overallReqTarget = requiredClassesForTarget(totalAttended, totalConducted, totalRemaining, rules.targetPercentage);
 
   // Determine overall status (worst of all subjects)
   const statusPriority: AttendanceStatus[] = ['irreversible', 'danger', 'warning', 'safe'];
